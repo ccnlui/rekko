@@ -671,6 +671,7 @@ version = "0.1.0"
 dependencies = [
  "futures-core",
  "futures-util",
+ "h2",
  "prost",
  "tokio",
  "tokio-stream",

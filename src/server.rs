@@ -8,6 +8,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 use std::error::Error;
+use std::io::ErrorKind;
 use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use std::time::Duration;
@@ -79,9 +80,73 @@ impl Rekko for EchoServer {
     type BidirectionalStreamingEchoStream = ResponseStream;
     async fn bidirectional_streaming_echo(
         &self,
-        _req: Request<Streaming<EchoRequest>>,
+        req: Request<Streaming<EchoRequest>>,
     ) -> EchoResult<Self::BidirectionalStreamingEchoStream> {
-        Err(Status::unimplemented("not implemented"))
+
+        println!("Bidirectional streaming echo");
+        println!("client connected from: {:?}", req.remote_addr());
+
+        let mut inbound = req.into_inner();
+        let (tx, rx) = mpsc::channel(128);
+
+        // this spawn here is required if you want to handle connection error.
+        // If we just map `inbound` and write it back as `out_stream` the `out_stream`
+        // will be drooped when connection error occurs and error will never be propagated
+        // to mapped version of `inbound`.
+        tokio::spawn(async move {
+            while let Some(r) = inbound.next().await {
+                match r {
+                    Ok(echo_req) => tx
+                        .send(Ok(EchoResponse{ message: echo_req.message }))
+                        .await
+                        .expect("working rx"),
+                    Err(status) => {
+                        if let Some(io_err) = match_for_io_error(&status) {
+                            if io_err.kind() == ErrorKind::BrokenPipe {
+                                eprintln!("client disconnected: broken pipe");
+                                break;
+                            }
+                        }
+
+                        match tx.send(Err(status)).await {
+                            Ok(_) => (),
+                            Err(_err) => break, // response was dropped
+                        }
+                    }
+                }
+            }
+            println!("stream ended");
+        });
+
+        let outbound = ReceiverStream::new(rx);
+
+        Ok(Response::new(
+            Box::pin(outbound) as Self::BidirectionalStreamingEchoStream
+        ))
+
+    }
+}
+
+fn match_for_io_error(err_status: &Status) -> Option<&std::io::Error> {
+    let mut err: &(dyn Error + 'static) = err_status;
+
+    loop {
+        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            return Some(io_err);
+        }
+
+        // h2::Error do not expose std::io::Error with `source()`
+        // https://github.com/hyperium/h2/pull/462
+        if let Some(h2_err) = err.downcast_ref::<h2::Error>() {
+            if let Some(io_err) = h2_err.get_io() {
+                return Some(io_err);
+            }
+        }
+
+        err = match err.source() {
+            Some(err) => err,
+            None => return None,
+        };
     }
 }
 
