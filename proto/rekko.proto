@@ -1,0 +1,17 @@
+syntax = "proto3";
+package rekko;
+
+message EchoRequest {
+    string message = 1;
+}
+
+message EchoResponse {
+    string message = 1;
+}
+
+service Rekko {
+    rpc UnaryEcho(EchoRequest) returns (EchoResponse) {}
+    rpc ServerStreamingEcho(EchoRequest) returns (stream EchoResponse) {}
+    rpc ClientStreamingEcho(stream EchoRequest) returns (EchoResponse) {}
+    rpc BidirectionalStreamingEcho(stream EchoRequest) returns (stream EchoResponse) {}
+}
