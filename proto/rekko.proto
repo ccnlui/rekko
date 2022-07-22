@@ -2,11 +2,13 @@ syntax = "proto3";
 package rekko;
 
 message EchoRequest {
-    string message = 1;
+    uint64 timestamp = 1;
+    bytes payload = 2;
 }
 
 message EchoResponse {
-    string message = 1;
+    uint64 timestamp = 1;
+    bytes payload = 2;
 }
 
 service Rekko {

@@ -4,6 +4,7 @@ pub mod pb {
 
 use futures_core::Stream;
 use tokio::sync::mpsc;
+use tokio::time;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
@@ -12,6 +13,7 @@ use std::io::ErrorKind;
 use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use pb::EchoRequest;
 use pb::EchoResponse;
@@ -43,15 +45,17 @@ impl Rekko for EchoServer {
         println!("Server streaming echo");
         println!("client connected from: {:?}", req.remote_addr());
 
-        let repeat = std::iter::repeat(EchoResponse{
-            message: req.into_inner().message,
-        });
-        let mut stream = Box::pin(tokio_stream::iter(repeat).throttle(Duration::from_millis(100)));
-
+        let mut interval = time::interval(Duration::from_millis(100));
         let (tx, rx) = mpsc::channel(128);
+
         tokio::spawn(async move {
-            while let Some(item) = stream.next().await {
-                match tx.send(Result::<_, Status>::Ok(item)).await {
+            loop {
+                interval.tick().await;
+                let msg = EchoResponse{
+                    timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64,
+                    payload: (0..100).collect(),
+                };
+                match tx.send(Result::<_, Status>::Ok(msg)).await {
                     Ok(_) => {
                         // item (server response) was queued to be send to client
                     }
@@ -64,9 +68,9 @@ impl Rekko for EchoServer {
             println!("client disconnected");
         });
 
-        let output_stream = ReceiverStream::new(rx);
+        let outbound = ReceiverStream::new(rx);
         Ok(Response::new(
-            Box::pin(output_stream) as Self::ServerStreamingEchoStream
+            Box::pin(outbound) as Self::ServerStreamingEchoStream
         ))
     }
 
@@ -96,8 +100,11 @@ impl Rekko for EchoServer {
         tokio::spawn(async move {
             while let Some(r) = inbound.next().await {
                 match r {
-                    Ok(echo_req) => tx
-                        .send(Ok(EchoResponse{ message: echo_req.message }))
+                    Ok(req) => tx
+                        .send(Ok(EchoResponse{ 
+                            timestamp: req.timestamp,
+                            payload: req.payload,
+                        }))
                         .await
                         .expect("working rx"),
                     Err(status) => {
