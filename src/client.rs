@@ -21,7 +21,7 @@ async fn server_streaming_echo(client: &mut RekkoClient<Channel>, num: usize) {
 
     let mut stream = stream.take(num);
     while let Some(item) = stream.next().await {
-        println!("\treceived: {}", item.unwrap().message);
+        println!("received: {}", item.unwrap().message);
     }
     // stream is droped here and the disconnect info is send to server
 }

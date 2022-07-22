@@ -3,10 +3,14 @@ pub mod pb {
 }
 
 use futures_core::Stream;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{transport::Server, Request, Response, Status, Streaming};
 use std::error::Error;
 use std::net::ToSocketAddrs;
 use std::pin::Pin;
-use tonic::{transport::Server, Request, Response, Status, Streaming};
+use std::time::Duration;
 
 use pb::EchoRequest;
 use pb::EchoResponse;
@@ -24,7 +28,7 @@ impl Rekko for EchoServer {
 
     async fn unary_echo(
         &self,
-        _request: Request<EchoRequest>,
+        _req: Request<EchoRequest>,
     ) -> EchoResult<EchoResponse> {
         Err(Status::unimplemented("not implemented"))
     }
@@ -32,14 +36,42 @@ impl Rekko for EchoServer {
     type ServerStreamingEchoStream = ResponseStream;
     async fn server_streaming_echo(
         &self,
-        _request: Request<EchoRequest>,
+        req: Request<EchoRequest>,
     ) -> EchoResult<Self::ServerStreamingEchoStream> {
-        Err(Status::unimplemented("not implemented"))
+
+        println!("Server streaming echo");
+        println!("client connected from: {:?}", req.remote_addr());
+
+        let repeat = std::iter::repeat(EchoResponse{
+            message: req.into_inner().message,
+        });
+        let mut stream = Box::pin(tokio_stream::iter(repeat).throttle(Duration::from_millis(100)));
+
+        let (tx, rx) = mpsc::channel(128);
+        tokio::spawn(async move {
+            while let Some(item) = stream.next().await {
+                match tx.send(Result::<_, Status>::Ok(item)).await {
+                    Ok(_) => {
+                        // item (server response) was queued to be send to client
+                    }
+                    Err(_item) => {
+                        // output_stream was build from rx and both are dropped
+                        break;
+                    }
+                }
+            }
+            println!("client disconnected");
+        });
+
+        let output_stream = ReceiverStream::new(rx);
+        Ok(Response::new(
+            Box::pin(output_stream) as Self::ServerStreamingEchoStream
+        ))
     }
 
     async fn client_streaming_echo(
         &self,
-        _request: Request<Streaming<EchoRequest>>,
+        _req: Request<Streaming<EchoRequest>>,
     ) -> EchoResult<EchoResponse> {
         Err(Status::unimplemented("not implemented"))
     }
@@ -47,7 +79,7 @@ impl Rekko for EchoServer {
     type BidirectionalStreamingEchoStream = ResponseStream;
     async fn bidirectional_streaming_echo(
         &self,
-        _request: Request<Streaming<EchoRequest>>,
+        _req: Request<Streaming<EchoRequest>>,
     ) -> EchoResult<Self::BidirectionalStreamingEchoStream> {
         Err(Status::unimplemented("not implemented"))
     }
