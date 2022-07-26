@@ -3,7 +3,9 @@ pub mod pb {
 }
 
 use std::error::Error;
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, Duration};
 use tonic::transport::Channel;
 use tokio::sync::{mpsc, broadcast};
 use tokio::task::JoinHandle;
@@ -17,7 +19,9 @@ use pb::EchoRequest;
 async fn server_streaming_echo(
     mut sig_shutdown: broadcast::Receiver<()>,
     client: &mut RekkoClient<Channel>,
-) -> (mpsc::UnboundedSender<EchoRequest>, JoinHandle<Histogram<u64>>) {
+    histogram: Arc<Mutex<Histogram<u64>>>,
+    count: Arc<AtomicU32>,
+) -> (mpsc::UnboundedSender<EchoRequest>, JoinHandle<()>) {
 
     let (tx, rx) = mpsc::unbounded_channel();
     let mut inbound = client
@@ -27,17 +31,22 @@ async fn server_streaming_echo(
         .into_inner();
 
     let handle = tokio::spawn(async move {
-
-        const NANOS_PER_HOUR: u64 = 60 * 60 * 1_000_000_000;
-        let mut histogram: Histogram<u64> = Histogram::new_with_max(NANOS_PER_HOUR, 3).unwrap();
-
         loop {
             tokio::select! {
-                Ok(res) = inbound.message() => {
-                    let resp = res.unwrap();
-                    let latency = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64 - resp.timestamp;
-                    histogram.record(latency).unwrap();
-                    // println!("received: {} - {} bytes {} latency", resp.timestamp, resp.payload.len(), latency);
+                result = inbound.message() => {
+                    match result {
+                        Ok(opt) => {
+                            let resp = opt.unwrap();
+                            let latency = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64 - resp.timestamp;
+                            histogram.lock().unwrap().record(latency).unwrap();
+                            count.fetch_add(1, Ordering::SeqCst);
+                            // println!("received: {} - {} bytes {} latency", resp.timestamp, resp.payload.len(), latency);
+                        }
+                        Err(status) => {
+                            println!("disconnected error: {:?}", status);
+                            break;
+                        }
+                    }
                 }
                 _ = sig_shutdown.recv() => {
                     println!("shutting down client...");
@@ -45,22 +54,89 @@ async fn server_streaming_echo(
                 }
             }
         }
-        histogram
     });
 
     (tx, handle)
 }
 
-fn send(tx: &mut mpsc::UnboundedSender<EchoRequest>, number_of_messages: u32) {
-    let timestamp_ns = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64;
+fn send_and_receive(
+    tx: &mut mpsc::UnboundedSender<EchoRequest>,
+    number_of_messages: u32,
+    iterations: u32,
+    count: Arc<AtomicU32>,
+) -> u32 {
 
+    let total_number_of_messages: u64 = (iterations * number_of_messages) as u64;
+    let mut sent_messages: u32 = 0;
+    let batch_size = 1;
+
+    let start_time = SystemTime::now();
+    let end_time = start_time.checked_add(Duration::from_secs(iterations as u64)).unwrap();
+    let send_interval = Duration::from_secs_f64(1.0 / number_of_messages as f64);
+    let mut timestamp = start_time;
+    let mut now = start_time;
+    let mut next_report_time = start_time.checked_add(Duration::from_secs(1)).unwrap();
+
+    loop {
+        send(tx, batch_size, timestamp.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64);
+        sent_messages += batch_size;
+        if total_number_of_messages == sent_messages as u64 {
+            report_progress(start_time, now, sent_messages);
+            break;
+        }
+
+        now = SystemTime::now();
+        timestamp = timestamp.checked_add(send_interval).unwrap();
+        while now < timestamp && now < end_time {
+            now = SystemTime::now();
+        }
+
+        if now >= end_time {
+            break;
+        }
+
+        if now >= next_report_time {
+            let elapsed_seconds = report_progress(start_time, now, sent_messages);
+            next_report_time = start_time.checked_add(Duration::from_secs(elapsed_seconds + 1)).unwrap();
+        }
+    }
+
+    let deadline = SystemTime::now().checked_add(Duration::from_secs(30)).unwrap();
+    while count.load(Ordering::SeqCst) < sent_messages {
+        if SystemTime::now() >= deadline {
+            println!("***WARNING: Not all messages were received after 30s deadline!");
+            break;
+        }
+    }
+
+    sent_messages
+}
+
+fn send(tx: &mut mpsc::UnboundedSender<EchoRequest>, number_of_messages: u32, timestamp: u64) {
     for _ in 0..number_of_messages {
-        tx.send(EchoRequest{ timestamp: timestamp_ns, payload: (0..100).collect() }).unwrap();
+        tx.send(EchoRequest{
+            timestamp,
+            payload: (0..100).collect()
+        }).unwrap();
     };
 }
 
+fn report_progress(
+    start_time: SystemTime,
+    now: SystemTime,
+    sent_messages: u32,
+) -> u64 {
+    let elapsed_seconds = now.duration_since(start_time).unwrap().as_secs();
+    let send_rate = match elapsed_seconds == 0 {
+        true => sent_messages,
+        false => sent_messages / elapsed_seconds as u32,
+    };
+    println!("Send rate {} msg/sec", send_rate);
+    elapsed_seconds
+}
+
 fn output_percentile_distribution(
-    histogram: Histogram<u64>,
+    histogram: Arc<Mutex<Histogram<u64>>>,
     quantile_precision: usize,
     ticks_per_half: u32,
 ) {
@@ -74,7 +150,7 @@ fn output_percentile_distribution(
         quantile_precision = quantile_precision + 2 // + 2 from leading "0." for numbers
     );
     let mut sum = 0;
-    for v in histogram.iter_quantiles(ticks_per_half) {
+    for v in histogram.lock().unwrap().iter_quantiles(ticks_per_half) {
         sum += v.count_since_last_iteration();
         if v.quantile_iterated_to() < 1.0 {
             println!(
@@ -105,9 +181,20 @@ fn output_percentile_distribution(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
 
+    const NANOS_PER_HOUR: u64 = 60 * 60 * 1_000_000_000;
+
     let (notify_shutdown, _) = broadcast::channel(1);
-    let mut client = RekkoClient::connect("http://127.0.0.1:9090").await.unwrap();
-    let (mut tx, handle) = server_streaming_echo(notify_shutdown.subscribe(), &mut client).await;
+    let mut client = RekkoClient::connect("http://127.0.0.1:9090").await.unwrap();    
+    let histogram: Histogram<u64> = Histogram::new_with_max(NANOS_PER_HOUR, 3).unwrap();
+    let histogram = Arc::new(Mutex::new(histogram));
+    let count = Arc::new(AtomicU32::new(0));
+
+    let (mut tx, _) = server_streaming_echo(
+        notify_shutdown.subscribe(),
+        &mut client,
+        Arc::clone(&histogram),
+        Arc::clone(&count),
+    ).await;
 
     tokio::spawn(async move {
         signal::ctrl_c().await.unwrap();
@@ -116,8 +203,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
 
-    let warmup_iterations = 1;
-    let warmup_message_rate = 10;
+    let warmup_iterations = 10;
+    let warmup_message_rate = 100_000;
     let message_length = 100;
     let batch_size = 1;
 
@@ -126,10 +213,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         warmup_message_rate,
         message_length,
         batch_size);
+    send_and_receive(&mut tx, warmup_message_rate, warmup_iterations, Arc::clone(&count));
+    count.store(0, Ordering::SeqCst);
+    histogram.lock().unwrap().reset();
 
-    send(&mut tx, warmup_message_rate);
+    let iterations = 10;
+    let message_rate = 100_000;
 
-    let histogram = handle.await.unwrap();
+    println!("Running measurement for {} iterations of {} messages each, with {} bytes payload and a burst size of {}...",
+        iterations,
+        message_rate,
+        message_length,
+        batch_size);
+    send_and_receive(&mut tx, message_rate, iterations, Arc::clone(&count));
+
     output_percentile_distribution(histogram, 3, 5);
 
     Ok(())

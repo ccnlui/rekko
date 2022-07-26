@@ -100,13 +100,15 @@ impl Rekko for EchoServer {
         tokio::spawn(async move {
             while let Some(r) = inbound.next().await {
                 match r {
-                    Ok(req) => tx
-                        .send(Ok(EchoResponse{ 
+                    Ok(req) => {
+                        tx.send(Ok(EchoResponse{ 
                             timestamp: req.timestamp,
                             payload: req.payload,
                         }))
                         .await
-                        .expect("working rx"),
+                        .expect("working rx");
+                        // println!("got: {}", req.timestamp);
+                    }
                     Err(status) => {
                         if let Some(io_err) = match_for_io_error(&status) {
                             if io_err.kind() == ErrorKind::BrokenPipe {
@@ -130,7 +132,6 @@ impl Rekko for EchoServer {
         Ok(Response::new(
             Box::pin(outbound) as Self::BidirectionalStreamingEchoStream
         ))
-
     }
 }
 
