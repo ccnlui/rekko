@@ -3,6 +3,7 @@ pub mod pb {
 }
 
 use std::error::Error;
+use std::fmt::Display;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, Duration};
@@ -136,7 +137,7 @@ fn report_progress(
 }
 
 fn output_percentile_distribution(
-    histogram: Arc<Mutex<Histogram<u64>>>,
+    histogram: &Histogram<u64>,
     quantile_precision: usize,
     ticks_per_half: u32,
 ) {
@@ -150,7 +151,7 @@ fn output_percentile_distribution(
         quantile_precision = quantile_precision + 2 // + 2 from leading "0." for numbers
     );
     let mut sum = 0;
-    for v in histogram.lock().unwrap().iter_quantiles(ticks_per_half) {
+    for v in histogram.iter_quantiles(ticks_per_half) {
         sum += v.count_since_last_iteration();
         if v.quantile_iterated_to() < 1.0 {
             println!(
@@ -176,6 +177,36 @@ fn output_percentile_distribution(
             )
         }
     }
+
+    fn write_extra_data<T1: Display, T2: Display>(
+        label1: &str,
+        data1: T1,
+        label2: &str,
+        data2: T2,
+    ) {
+        println!(
+            "#[{:10} = {:12.2}, {:14} = {:12.2}]",
+            label1, data1, label2, data2
+        );
+    }
+    write_extra_data(
+        "Mean",
+        histogram.mean(),
+        "StdDeviation",
+        histogram.stdev(),
+    );
+    write_extra_data(
+        "Max",
+        histogram.max(),
+        "Total count",
+        histogram.len()
+    );
+    write_extra_data(
+        "Buckets",
+        histogram.buckets(),
+        "SubBuckets",
+        histogram.distinct_values(),
+    );
 }
 
 #[tokio::main]
@@ -227,7 +258,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         batch_size);
     send_and_receive(&mut tx, message_rate, iterations, Arc::clone(&count));
 
-    output_percentile_distribution(histogram, 3, 5);
+    output_percentile_distribution(histogram.lock().as_deref().unwrap(), 12, 5);
 
     Ok(())
 }
