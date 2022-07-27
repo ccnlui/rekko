@@ -12,6 +12,7 @@ name = "client"
 path = "src/client.rs"
 
 [dependencies]
+async-stream = "0.3.3"
 futures-core = "0.3.21"
 futures-util = "0.3.21"
 h2 = "0.3.13"

@@ -6,11 +6,9 @@ use futures_core::Stream;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 use std::error::Error;
-use std::io::ErrorKind;
 use std::pin::Pin;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -91,42 +89,49 @@ impl Rekko for EchoServer {
         println!("client connected from: {:?}", req.remote_addr());
 
         let mut inbound = req.into_inner();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let outbound = async_stream::try_stream! {
+            while let Some(r) = inbound.next().await {
+                let req = r?;
+                let resp = EchoResponse{
+                    timestamp: req.timestamp,
+                    payload: req.payload,
+                };
+                yield resp;
+            }
+        };
 
         // this spawn here is required if you want to handle connection error.
         // If we just map `inbound` and write it back as `out_stream` the `out_stream`
         // will be drooped when connection error occurs and error will never be propagated
         // to mapped version of `inbound`.
-        tokio::spawn(async move {
-            while let Some(r) = inbound.next().await {
-                match r {
-                    Ok(req) => {
-                        tx.send(Ok(EchoResponse{ 
-                            timestamp: req.timestamp,
-                            payload: req.payload,
-                        }))
-                        .expect("working rx");
-                        // println!("got: {}", req.timestamp);
-                    }
-                    Err(status) => {
-                        if let Some(io_err) = match_for_io_error(&status) {
-                            if io_err.kind() == ErrorKind::BrokenPipe {
-                                eprintln!("client disconnected: broken pipe");
-                                break;
-                            }
-                        }
+        // tokio::spawn(async move {
+        //     while let Some(r) = inbound.next().await {
+        //         match r {
+        //             Ok(req) => {
+        //                 tx.send(Ok(EchoResponse{ 
+        //                     timestamp: req.timestamp,
+        //                     payload: req.payload,
+        //                 }))
+        //                 .expect("working rx");
+        //                 // println!("got: {}", req.timestamp);
+        //             }
+        //             Err(status) => {
+        //                 if let Some(io_err) = match_for_io_error(&status) {
+        //                     if io_err.kind() == ErrorKind::BrokenPipe {
+        //                         eprintln!("client disconnected: broken pipe");
+        //                         break;
+        //                     }
+        //                 }
 
-                        match tx.send(Err(status)) {
-                            Ok(_) => (),
-                            Err(_err) => break, // response was dropped
-                        }
-                    }
-                }
-            }
-            println!("stream ended");
-        });
-
-        let outbound = UnboundedReceiverStream::new(rx);
+        //                 match tx.send(Err(status)) {
+        //                     Ok(_) => (),
+        //                     Err(_err) => break, // response was dropped
+        //                 }
+        //             }
+        //         }
+        //     }
+        //     println!("stream ended");
+        // });
 
         Ok(Response::new(
             Box::pin(outbound) as Self::BidirectionalStreamingEchoStream
@@ -134,6 +139,7 @@ impl Rekko for EchoServer {
     }
 }
 
+#[allow(dead_code)]
 fn match_for_io_error(err_status: &Status) -> Option<&std::io::Error> {
     let mut err: &(dyn Error + 'static) = err_status;
 
