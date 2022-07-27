@@ -1,8 +1,9 @@
 pub mod pb {
-    tonic::include_proto!("rekko");
+    tonic::include_proto!("ekko");
 }
 
 use futures_core::Stream;
+use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_stream::StreamExt;
@@ -15,8 +16,8 @@ use std::time::SystemTime;
 
 use pb::EchoRequest;
 use pb::EchoResponse;
-use pb::rekko_server::Rekko;
-use pb::rekko_server::RekkoServer;
+use pb::ekko_server::Ekko;
+use pb::ekko_server::EkkoServer;
 
 type EchoResult<T> = Result<Response<T>, Status>;
 type ResponseStream = Pin<Box<dyn Stream<Item = Result<EchoResponse, Status>> + Send>>;
@@ -25,7 +26,7 @@ type ResponseStream = Pin<Box<dyn Stream<Item = Result<EchoResponse, Status>> + 
 pub struct EchoServer {}
 
 #[tonic::async_trait]
-impl Rekko for EchoServer {
+impl Ekko for EchoServer {
 
     async fn unary_echo(
         &self,
@@ -163,14 +164,21 @@ fn match_for_io_error(err_status: &Status) -> Option<&std::io::Error> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let server = EchoServer{};
-    Server::builder()
-        .add_service(RekkoServer::new(server))
-        .serve("127.0.0.1:9090".parse().unwrap())
-        .await
+fn main() -> Result<(), Box<dyn Error>> {
+
+    let rt = Builder::new_current_thread()
+        .enable_io()
+        .event_interval(31)
+        .global_queue_interval(31)
+        .build()
         .unwrap();
+    let server = EchoServer{};
+
+    let fut = Server::builder()
+        .add_service(EkkoServer::new(server))
+        .serve("127.0.0.1:9090".parse().unwrap());
+
+    rt.block_on(fut)?;
 
     Ok(())
 }

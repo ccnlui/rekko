@@ -1,5 +1,5 @@
 pub mod pb {
-    tonic::include_proto!("rekko");
+    tonic::include_proto!("ekko");
 }
 
 use std::error::Error;
@@ -14,12 +14,12 @@ use tokio::signal;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use hdrhistogram::Histogram;
 
-use pb::rekko_client::RekkoClient;
+use pb::ekko_client::EkkoClient;
 use pb::EchoRequest;
 
 async fn server_streaming_echo(
     mut sig_shutdown: broadcast::Receiver<()>,
-    client: &mut RekkoClient<Channel>,
+    client: &mut EkkoClient<Channel>,
     histogram: Arc<Mutex<Histogram<u64>>>,
     count: Arc<AtomicU32>,
 ) -> (mpsc::UnboundedSender<EchoRequest>, JoinHandle<()>) {
@@ -221,7 +221,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     const NANOS_PER_HOUR: u64 = 60 * 60 * 1_000_000_000;
 
     let (notify_shutdown, _) = broadcast::channel(1);
-    let mut client = RekkoClient::connect("http://127.0.0.1:9090").await.unwrap();    
+    let mut client = EkkoClient::connect("http://127.0.0.1:9090").await.unwrap();    
     let histogram: Histogram<u64> = Histogram::new_with_max(NANOS_PER_HOUR, 3).unwrap();
     let histogram = Arc::new(Mutex::new(histogram));
     let count = Arc::new(AtomicU32::new(0));

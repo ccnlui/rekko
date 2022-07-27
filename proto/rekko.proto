@@ -1,5 +1,5 @@
 syntax = "proto3";
-package rekko;
+package ekko;
 
 message EchoRequest {
     uint64 timestamp = 1;
@@ -11,7 +11,7 @@ message EchoResponse {
     bytes payload = 2;
 }
 
-service Rekko {
+service Ekko {
     rpc UnaryEcho(EchoRequest) returns (EchoResponse) {}
     rpc ServerStreamingEcho(EchoRequest) returns (stream EchoResponse) {}
     rpc ClientStreamingEcho(stream EchoRequest) returns (EchoResponse) {}
