@@ -6,11 +6,11 @@ use futures_core::Stream;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 use std::error::Error;
 use std::io::ErrorKind;
-use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -91,7 +91,7 @@ impl Rekko for EchoServer {
         println!("client connected from: {:?}", req.remote_addr());
 
         let mut inbound = req.into_inner();
-        let (tx, rx) = mpsc::channel(128);
+        let (tx, rx) = mpsc::unbounded_channel();
 
         // this spawn here is required if you want to handle connection error.
         // If we just map `inbound` and write it back as `out_stream` the `out_stream`
@@ -105,7 +105,6 @@ impl Rekko for EchoServer {
                             timestamp: req.timestamp,
                             payload: req.payload,
                         }))
-                        .await
                         .expect("working rx");
                         // println!("got: {}", req.timestamp);
                     }
@@ -117,7 +116,7 @@ impl Rekko for EchoServer {
                             }
                         }
 
-                        match tx.send(Err(status)).await {
+                        match tx.send(Err(status)) {
                             Ok(_) => (),
                             Err(_err) => break, // response was dropped
                         }
@@ -127,7 +126,7 @@ impl Rekko for EchoServer {
             println!("stream ended");
         });
 
-        let outbound = ReceiverStream::new(rx);
+        let outbound = UnboundedReceiverStream::new(rx);
 
         Ok(Response::new(
             Box::pin(outbound) as Self::BidirectionalStreamingEchoStream
@@ -163,7 +162,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let server = EchoServer{};
     Server::builder()
         .add_service(RekkoServer::new(server))
-        .serve("127.0.0.1:9090".to_socket_addrs().unwrap().next().unwrap())
+        .serve("127.0.0.1:9090".parse().unwrap())
         .await
         .unwrap();
 
