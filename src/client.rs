@@ -62,6 +62,7 @@ async fn server_streaming_echo(
 
 fn send_and_receive(
     tx: &mut mpsc::UnboundedSender<EchoRequest>,
+    msg: Vec<u8>,
     number_of_messages: u32,
     iterations: u32,
     count: Arc<AtomicU32>,
@@ -79,7 +80,7 @@ fn send_and_receive(
     let mut next_report_time = start_time.checked_add(Duration::from_secs(1)).unwrap();
 
     loop {
-        send(tx, batch_size, timestamp.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64);
+        send(tx, batch_size, msg.clone(), timestamp.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64);
         sent_messages += batch_size;
         if total_number_of_messages == sent_messages as u64 {
             report_progress(start_time, now, sent_messages);
@@ -105,7 +106,7 @@ fn send_and_receive(
     let deadline = SystemTime::now().checked_add(Duration::from_secs(30)).unwrap();
     while count.load(Ordering::SeqCst) < sent_messages {
         if SystemTime::now() >= deadline {
-            println!("***WARNING: Not all messages were received after 30s deadline!");
+            println!("*** WARNING: Not all messages were received after 30s deadline!");
             break;
         }
     }
@@ -113,11 +114,16 @@ fn send_and_receive(
     sent_messages
 }
 
-fn send(tx: &mut mpsc::UnboundedSender<EchoRequest>, number_of_messages: u32, timestamp: u64) {
+fn send(
+    tx: &mut mpsc::UnboundedSender<EchoRequest>,
+    number_of_messages: u32,
+    msg: Vec<u8>,
+    timestamp: u64,
+) {
     for _ in 0..number_of_messages {
         tx.send(EchoRequest{
             timestamp,
-            payload: (0..100).collect()
+            payload: msg.clone(),
         }).unwrap();
     };
 }
@@ -233,6 +239,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("ctrl-c received!");
     });
 
+    let msg: Vec<u8> = (0..100).collect();
 
     let warmup_iterations = 10;
     let warmup_message_rate = 100_000;
@@ -244,19 +251,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         warmup_message_rate,
         message_length,
         batch_size);
-    send_and_receive(&mut tx, warmup_message_rate, warmup_iterations, Arc::clone(&count));
+    send_and_receive(&mut tx, msg.clone(), warmup_message_rate, warmup_iterations, Arc::clone(&count));
     count.store(0, Ordering::SeqCst);
     histogram.lock().unwrap().reset();
 
     let iterations = 10;
-    let message_rate = 100_000;
+    let message_rate = 500_000;
 
     println!("Running measurement for {} iterations of {} messages each, with {} bytes payload and a burst size of {}...",
         iterations,
         message_rate,
         message_length,
         batch_size);
-    send_and_receive(&mut tx, message_rate, iterations, Arc::clone(&count));
+    send_and_receive(&mut tx, msg.clone(), message_rate, iterations, Arc::clone(&count));
 
     output_percentile_distribution(histogram.lock().as_deref().unwrap(), 12, 5);
 
