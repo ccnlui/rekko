@@ -2,18 +2,21 @@ pub mod pb {
     tonic::include_proto!("ekko");
 }
 
+use std::cmp::min;
 use std::error::Error;
 use std::fmt::Display;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{Ordering, AtomicU64};
 use std::time::{SystemTime, Duration};
 use tonic::transport::Channel;
 use tokio::sync::{mpsc, broadcast};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, yield_now};
 use tokio::signal;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use hdrhistogram::Histogram;
 
+use rekko::constants::NANOS_PER_SECOND;
+use rekko::constants::NANOS_PER_HOUR;
 use pb::ekko_client::EkkoClient;
 use pb::EchoRequest;
 
@@ -21,7 +24,7 @@ async fn server_streaming_echo(
     mut sig_shutdown: broadcast::Receiver<()>,
     client: &mut EkkoClient<Channel>,
     histogram: Arc<Mutex<Histogram<u64>>>,
-    count: Arc<AtomicU32>,
+    count: Arc<AtomicU64>,
 ) -> (mpsc::UnboundedSender<EchoRequest>, JoinHandle<()>) {
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -60,37 +63,54 @@ async fn server_streaming_echo(
     (tx, handle)
 }
 
-fn send_and_receive(
+async fn send_and_receive(
     tx: &mut mpsc::UnboundedSender<EchoRequest>,
     msg: Vec<u8>,
-    number_of_messages: u32,
-    iterations: u32,
-    count: Arc<AtomicU32>,
-) -> u32 {
+    number_of_messages: u64,
+    iterations: u64,
+    received_messages: Arc<AtomicU64>,
+) -> u64 {
 
-    let total_number_of_messages: u64 = (iterations * number_of_messages) as u64;
-    let mut sent_messages: u32 = 0;
-    let batch_size = 1;
+    let total_number_of_messages = iterations * number_of_messages;
+    let mut sent_messages: u64 = 0;
 
     let start_time = SystemTime::now();
-    let end_time = start_time.checked_add(Duration::from_secs(iterations as u64)).unwrap();
-    let send_interval = Duration::from_secs_f64(1.0 / number_of_messages as f64);
+    let end_time = start_time + Duration::from_secs(iterations);
+    let send_interval = Duration::from_nanos(NANOS_PER_SECOND * 1 / number_of_messages);
     let mut timestamp = start_time;
     let mut now = start_time;
-    let mut next_report_time = start_time.checked_add(Duration::from_secs(1)).unwrap();
+    let mut next_report_time = start_time + Duration::from_secs(1);
 
+    // TODO: make this configurable.
+    let mut batch_size: u64 = 1;
     loop {
-        send(tx, batch_size, msg.clone(), timestamp.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64);
-        sent_messages += batch_size;
-        if total_number_of_messages == sent_messages as u64 {
+        let sent = send(tx, batch_size, msg.clone(), timestamp.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64);
+
+        sent_messages += sent;
+        if total_number_of_messages == sent_messages {
             report_progress(start_time, now, sent_messages);
             break;
         }
 
         now = SystemTime::now();
-        timestamp = timestamp.checked_add(send_interval).unwrap();
-        while now < timestamp && now < end_time {
-            now = SystemTime::now();
+        if sent == batch_size {
+            // next batch
+            batch_size = min(total_number_of_messages - sent_messages, 1);
+            timestamp += send_interval;
+
+            // spin until next batch
+            let mut received = 0;
+            while now < timestamp && now < end_time {
+                if received < sent_messages {
+                    yield_now().await;
+                    received = received_messages.load(Ordering::SeqCst);
+                }
+                now = SystemTime::now();
+            }
+        } else {
+            // next batch
+            batch_size -= sent;
+            yield_now().await;
         }
 
         if now >= end_time {
@@ -99,16 +119,17 @@ fn send_and_receive(
 
         if now >= next_report_time {
             let elapsed_seconds = report_progress(start_time, now, sent_messages);
-            next_report_time = start_time.checked_add(Duration::from_secs(elapsed_seconds + 1)).unwrap();
+            next_report_time = start_time + Duration::from_secs(elapsed_seconds + 1);
         }
     }
 
-    let deadline = SystemTime::now().checked_add(Duration::from_secs(30)).unwrap();
-    while count.load(Ordering::SeqCst) < sent_messages {
+    let deadline = SystemTime::now() + Duration::from_secs(30);
+    while received_messages.load(Ordering::SeqCst) < sent_messages {
         if SystemTime::now() >= deadline {
             println!("*** WARNING: Not all messages were received after 30s deadline!");
             break;
         }
+        yield_now().await;
     }
 
     sent_messages
@@ -116,27 +137,24 @@ fn send_and_receive(
 
 fn send(
     tx: &mut mpsc::UnboundedSender<EchoRequest>,
-    number_of_messages: u32,
+    number_of_messages: u64,
     msg: Vec<u8>,
     timestamp: u64,
-) {
+) -> u64 {
     for _ in 0..number_of_messages {
         tx.send(EchoRequest{
             timestamp,
             payload: msg.clone(),
         }).unwrap();
     };
+    number_of_messages
 }
 
-fn report_progress(
-    start_time: SystemTime,
-    now: SystemTime,
-    sent_messages: u32,
-) -> u64 {
+fn report_progress(start_time: SystemTime, now: SystemTime, sent_messages: u64) -> u64 {
     let elapsed_seconds = now.duration_since(start_time).unwrap().as_secs();
     let send_rate = match elapsed_seconds == 0 {
         true => sent_messages,
-        false => sent_messages / elapsed_seconds as u32,
+        false => sent_messages / elapsed_seconds,
     };
     println!("Send rate {} msg/sec", send_rate);
     elapsed_seconds
@@ -215,16 +233,14 @@ fn output_percentile_distribution(
     );
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-
-    const NANOS_PER_HOUR: u64 = 60 * 60 * 1_000_000_000;
 
     let (notify_shutdown, _) = broadcast::channel(1);
     let mut client = EkkoClient::connect("http://127.0.0.1:9090").await.unwrap();    
     let histogram: Histogram<u64> = Histogram::new_with_max(NANOS_PER_HOUR, 3).unwrap();
     let histogram = Arc::new(Mutex::new(histogram));
-    let count = Arc::new(AtomicU32::new(0));
+    let count = Arc::new(AtomicU64::new(0));
 
     let (mut tx, _) = server_streaming_echo(
         notify_shutdown.subscribe(),
@@ -242,8 +258,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let msg: Vec<u8> = (0..100).collect();
 
     let warmup_iterations = 10;
-    let warmup_message_rate = 100_000;
-    let message_length = 100;
+    let warmup_message_rate = 20_000;
+    let message_length = 128;
     let batch_size = 1;
 
     println!("Running warmup for {} iterations of {} messages each, with {} bytes payload and a burst size of {}...",
@@ -251,7 +267,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         warmup_message_rate,
         message_length,
         batch_size);
-    send_and_receive(&mut tx, msg.clone(), warmup_message_rate, warmup_iterations, Arc::clone(&count));
+    send_and_receive(&mut tx, msg.clone(), warmup_message_rate, warmup_iterations, Arc::clone(&count)).await;
     count.store(0, Ordering::SeqCst);
     histogram.lock().unwrap().reset();
 
@@ -263,7 +279,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         message_rate,
         message_length,
         batch_size);
-    send_and_receive(&mut tx, msg.clone(), message_rate, iterations, Arc::clone(&count));
+    send_and_receive(&mut tx, msg.clone(), message_rate, iterations, Arc::clone(&count)).await;
 
     output_percentile_distribution(histogram.lock().as_deref().unwrap(), 12, 5);
 

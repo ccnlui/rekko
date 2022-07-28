@@ -1,0 +1,2 @@
+pub const NANOS_PER_SECOND: u64 = 1_000_000_000;
+pub const NANOS_PER_HOUR: u64 = 60 * 60 * 1_000_000_000;
