@@ -255,12 +255,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("ctrl-c received!");
     });
 
-    let msg: Vec<u8> = (0..100).collect();
-
+    
     let warmup_iterations = 10;
     let warmup_message_rate = 20_000;
     let message_length = 128;
     let batch_size = 1;
+
+    let msg: Vec<u8> = (0..message_length).collect();
 
     println!("Running warmup for {} iterations of {} messages each, with {} bytes payload and a burst size of {}...",
         warmup_iterations,
