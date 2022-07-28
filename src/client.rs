@@ -280,7 +280,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         message_rate,
         message_length,
         batch_size);
-    send_and_receive(&mut tx, msg.clone(), message_rate, iterations, Arc::clone(&count)).await;
+    let sent_messages = send_and_receive(&mut tx, msg.clone(), message_rate, iterations, Arc::clone(&count)).await;
+    println!("sent messages: {}", sent_messages);
 
     output_percentile_distribution(histogram.lock().as_deref().unwrap(), 12, 5);
 
