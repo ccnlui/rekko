@@ -75,7 +75,7 @@ async fn send_and_receive(
     let mut sent_messages: u64 = 0;
 
     let start_time = SystemTime::now();
-    let end_time = start_time + Duration::from_secs(iterations);
+    let end_time = start_time + Duration::from_secs(iterations + 1);
     let send_interval = Duration::from_nanos(NANOS_PER_SECOND * 1 / number_of_messages);
     let mut timestamp = start_time;
     let mut now = start_time;
